@@ -52,3 +52,36 @@ int interface_get_local_ips()
   freeifaddrs(ifList);
   return 0;
 }
+
+#include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+void get_ip_for_interface(char* interface_name)
+{
+  struct ifreq ifr;
+  union {
+    struct sockaddr* addr;
+    struct sockaddr_in* in;
+  } sa;
+  int sockfd;
+
+  ifr.ifr_addr.sa_family = AF_INET;
+  memset(ifr.ifr_name, 0, sizeof(ifr.ifr_name));
+  strncpy(ifr.ifr_name, interface_name, sizeof(ifr.ifr_name));
+
+  if ((sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0) {
+    printf("Error : Cannot open socket to retrieve interface list");
+    return;
+  }
+
+  if (ioctl(sockfd, SIOCGIFADDR, &ifr) < 0) {
+    printf("Error : Unable to get IP information for interface %s",
+      interface_name);
+    close(sockfd);
+    return;
+  }
+
+  close(sockfd);
+  sa.addr = &ifr.ifr_addr;
+  printf("Address for %s: %s", interface_name, inet_ntoa(sa.in->sin_addr));
+}
