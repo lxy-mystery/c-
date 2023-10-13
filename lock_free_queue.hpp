@@ -1,71 +1,82 @@
-#ifndef __LOCK_FREE_QUEUE_HPP_
-#define __LOCK_FREE_QUEUE_HPP_
+#ifndef __LOCK_FREE_QUEUE_HPP_H__
+#define __LOCK_FREE_QUEUE_HPP_H__
 #include <atomic>
-#include <memory>
 
-template<typename T>
+template <typename T>
 class LockFreeQueue {
 private:
   struct Node {
-    std::shared_ptr<T> data;
+    T data;
     std::atomic<Node*> next;
 
-    Node(const T& item) : data(std::make_shared<T>(item)), next(nullptr) {}
+    Node(const T& value) : data(value), next(nullptr) {}
   };
 
-  alignas(128) std::atomic<Node*> head;
-  alignas(128) std::atomic<Node*> tail;
+  alignas(64) std::atomic<Node*> head;
+  alignas(64) std::atomic<Node*> tail;
 
 public:
-  LockFreeQueue() : head(new Node(T())), tail(head.load()) {}
+  LockFreeQueue() {
+    Node* dummyNode = new Node(T());
+    head.store(dummyNode, std::memory_order_relaxed);
+    tail.store(dummyNode, std::memory_order_relaxed);
+  }
 
   ~LockFreeQueue() {
-    while (Node* const oldHead = head.load()) {
-      head.store(oldHead->next);
-      delete oldHead;
+    while (Node* node = head.load(std::memory_order_relaxed)) {
+      head.store(node->next.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      delete node;
     }
   }
 
-  void Enqueue(const T& item) {
-    Node* newNode = new Node(item);
+  void Enqueue(const T& value) {
+    Node* newNode = new Node(value);
+    newNode->next.store(nullptr, std::memory_order_relaxed);
+
+    Node* prevTail = nullptr;
+    Node* currTail = nullptr;
+
     while (true) {
-      Node* const currTail = tail.load();
-      Node* const next = currTail->next.load();
-      if (currTail == tail.load()) {
-        if (next == nullptr) {
-          if (std::atomic_compare_exchange_strong(&currTail->next, &next, newNode)) {
-            std::atomic_compare_exchange_strong(&tail, &currTail, newNode);
-            return;
+      prevTail = tail.load(std::memory_order_relaxed);
+      currTail = prevTail->next.load(std::memory_order_acquire);
+
+      if (prevTail == tail.load(std::memory_order_relaxed)) {
+        if (currTail == nullptr) {
+          if (prevTail->next.compare_exchange_weak(currTail, newNode, std::memory_order_release, std::memory_order_relaxed)) {
+            break;
           }
         }
         else {
-          std::atomic_compare_exchange_strong(&tail, &currTail, next);
+          tail.compare_exchange_weak(prevTail, currTail, std::memory_order_relaxed, std::memory_order_relaxed);
         }
       }
     }
+
+    tail.compare_exchange_weak(prevTail, newNode, std::memory_order_release, std::memory_order_relaxed);
   }
 
-  std::shared_ptr<T> Dequeue() {
+  bool Dequeue(T& value) {
+    Node* prevHead = nullptr;
+    Node* currHead = nullptr;
+
     while (true) {
-      Node* const currHead = head.load();
-      Node* const currTail = tail.load();
-      Node* const next = currHead->next.load();
-      if (currHead == head.load()) {
-        if (currHead == currTail) {
-          if (next == nullptr) {
-            return std::shared_ptr<T>();
-          }
-          std::atomic_compare_exchange_strong(&tail, &currTail, next);
+      prevHead = head.load(std::memory_order_relaxed);
+      currHead = prevHead->next.load(std::memory_order_acquire);
+
+      if (prevHead == head.load(std::memory_order_relaxed)) {
+        if (currHead == nullptr) {
+          return false;  // Queue is empty
         }
-        else {
-          if (std::atomic_compare_exchange_strong(&head, &currHead, next)) {
-            std::shared_ptr<T> result(currHead->data);
-            delete currHead;
-            return result;
-          }
+
+        if (head.compare_exchange_weak(prevHead, currHead, std::memory_order_relaxed, std::memory_order_relaxed)) {
+          value = currHead->data;
+          delete prevHead;
+          break;
         }
       }
     }
+
+    return true;
   }
 };
 #endif
